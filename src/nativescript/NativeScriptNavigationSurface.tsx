@@ -228,7 +228,10 @@ function makeNativeScriptNavigationStore(): NativeScriptNavigationStore {
       mutateTree(snapshot.root, componentId, (node, parent) => {
         const stackNode = node.type === 'Stack' ? node : parent?.type === 'Stack' ? parent : undefined;
         if (stackNode) {
-          stackNode.children = [...(stackNode.children ?? []), layout];
+          const children = stackNode.children ?? [];
+          const componentIndex = children.findIndex((child) => child.id === componentId);
+          const baseChildren = componentIndex >= 0 ? children.slice(0, componentIndex + 1) : children;
+          stackNode.children = [...baseChildren, layout];
           stackId = stackNode.id ?? componentId;
           didPush = true;
         }
@@ -980,6 +983,34 @@ function navigationChildKey(childIds: any[]): string {
   return key;
 }
 
+function navigationChildIdsFromKey(key: string | undefined): string[] {
+  'worklet';
+  if (!key) {
+    return [];
+  }
+  const childIds: string[] = [];
+  const parts = key.split('|');
+  for (let index = 0; index < parts.length; index++) {
+    if (parts[index]) {
+      childIds[childIds.length] = parts[index];
+    }
+  }
+  return childIds;
+}
+
+function navigationChildIdsEqual(left: any[], right: any[]): boolean {
+  'worklet';
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index++) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function nativeControllerArray(globalObject: Record<string, any>, childControllers: any[]): any {
   'worklet';
   const api = globalObject.__nativeScriptNativeApi;
@@ -1057,102 +1088,60 @@ function navigationChildIndex(registry: any, parentId: string, childId: string):
   return -1;
 }
 
-function configureNativeBackButton(controller: any, props: any, registry: any, ctx: any) {
+function minimalBackButtonDisplayMode(): number {
   'worklet';
-  if (!ctx || !controller?.navigationItem || !props.parentId) {
+  const displayMode = nativeValue('UINavigationItemBackButtonDisplayMode');
+  return displayMode?.Minimal ?? displayMode?.minimal ?? 2;
+}
+
+function plainBarButtonStyle(): number {
+  'worklet';
+  const style = nativeValue('UIBarButtonItemStyle');
+  return style?.Plain ?? style?.plain ?? 0;
+}
+
+function ensureMinimalBackBarButton(navigationItem: any) {
+  'worklet';
+  if (!navigationItem || navigationItem.__rnnNativeScriptMinimalBackButton === true) {
+    return;
+  }
+  navigationItem.backButtonDisplayMode = minimalBackButtonDisplayMode();
+  const UIBarButtonItem = nativeValue('UIBarButtonItem');
+  if (!UIBarButtonItem || typeof UIBarButtonItem.alloc !== 'function') {
+    return;
+  }
+  const allocated = UIBarButtonItem.alloc();
+  let backItem = allocated;
+  if (allocated && typeof allocated.initWithTitleStyleTargetAction === 'function') {
+    backItem = allocated.initWithTitleStyleTargetAction('', plainBarButtonStyle(), null, null);
+  }
+  if (backItem) {
+    backItem.title = '';
+    navigationItem.backBarButtonItem = backItem;
+    navigationItem.__rnnNativeScriptMinimalBackButton = true;
+  }
+}
+
+function configureNativeBackButton(controller: any, props: any, registry: any, _ctx: any) {
+  'worklet';
+  if (!controller?.navigationItem || !props.parentId) {
     return;
   }
   const parentKind = registry.kinds[props.parentId];
   const childIndex = navigationChildIndex(registry, props.parentId, props.componentId);
+  const navigationItem = controller.navigationItem;
+  navigationItem.leftBarButtonItem = null;
+  navigationItem.leftBarButtonItems = null;
+  navigationItem.leftItemsSupplementBackButton = false;
+  navigationItem.hidesBackButton = false;
+  controller.__rnnNativeBackButtonId = null;
   if (parentKind !== 'stack' || childIndex <= 0) {
-    controller.navigationItem.leftBarButtonItem = null;
-    controller.navigationItem.hidesBackButton = false;
-    controller.__rnnNativeBackButtonId = null;
     return;
   }
-  if (controller.__rnnNativeBackButtonId === props.componentId) {
-    return;
-  }
-  const globalObject = globalThis as Record<string, any>;
-  const api = globalObject.__nativeScriptNativeApi;
-  const UIButton = api?.UIButton ?? globalObject.UIButton;
-  const UIBarButtonItem = api?.UIBarButtonItem ?? globalObject.UIBarButtonItem;
-  if (!UIButton || !UIBarButtonItem) {
-    return;
-  }
-  const UIButtonType = api?.UIButtonType ?? globalObject.UIButtonType;
-  const UIControlEvents = api?.UIControlEvents ?? globalObject.UIControlEvents;
-  const UIControlState = api?.UIControlState ?? globalObject.UIControlState;
-  const button =
-    typeof UIButton.buttonWithType === 'function'
-      ? UIButton.buttonWithType(UIButtonType?.System ?? 1)
-      : UIButton.alloc().init();
-  const normalState = UIControlState?.Normal ?? 0;
+  ensureMinimalBackBarButton(navigationItem);
   const previousChildId = (registry.parentChildren[props.parentId] ?? [])[childIndex - 1];
   const previousController = registry.controllers[previousChildId];
-  const backTitle = previousController?.title ?? 'Back';
-  const UIImage = api?.UIImage ?? globalObject.UIImage;
-  const backImage =
-    UIImage && typeof UIImage.systemImageNamed === 'function'
-      ? UIImage.systemImageNamed('chevron.backward')
-      : null;
-  if (backImage && typeof button.setImageForState === 'function') {
-    button.setImageForState(backImage, normalState);
-  }
-  if (typeof button.setTitleForState === 'function') {
-    button.setTitleForState(backTitle, normalState);
-  }
-  if (typeof button.sizeToFit === 'function') {
-    button.sizeToFit();
-  }
-  const currentWidth = button.frame?.size?.width ?? 0;
-  const CGRectMake = api?.CGRectMake ?? globalObject.CGRectMake;
-  if (typeof CGRectMake === 'function') {
-    button.frame = CGRectMake(0, 0, Math.max(96, currentWidth + 20), 44);
-  }
-  button.accessibilityIdentifier = `RNNBackButton.${props.componentId}`;
-  button.accessibilityLabel = backTitle;
-  button.exclusiveTouch = true;
-  ctx.targetAction(button, UIControlEvents?.TouchUpInside ?? 64, () => {
-    'worklet';
-    if (registry.containerTransitioning[props.parentId]) {
-      if (registry.pendingNativeBackPresses[props.parentId]) {
-        return;
-      }
-      registry.pendingNativeBackPresses[props.parentId] = true;
-      if (typeof setTimeout === 'function') {
-        setTimeout(() => {
-          'worklet';
-          registry.pendingNativeBackPresses[props.parentId] = false;
-          ctx.emit('onNativeBackPress', {
-            nativeEvent: {
-              componentId: props.componentId,
-            },
-          });
-        }, NATIVE_STACK_TRANSITION_MS);
-      } else {
-        registry.pendingNativeBackPresses[props.parentId] = false;
-        ctx.emit('onNativeBackPress', {
-          nativeEvent: {
-            componentId: props.componentId,
-          },
-        });
-      }
-      return;
-    }
-    ctx.emit('onNativeBackPress', {
-      nativeEvent: {
-        componentId: props.componentId,
-      },
-    });
-  });
-  const allocatedItem = UIBarButtonItem.alloc();
-  controller.navigationItem.leftBarButtonItem =
-    allocatedItem && typeof allocatedItem.initWithCustomView === 'function'
-      ? allocatedItem.initWithCustomView(button)
-      : allocatedItem;
-  controller.navigationItem.hidesBackButton = true;
-  controller.__rnnNativeBackButtonId = props.componentId;
+  ensureMinimalBackBarButton(previousController?.navigationItem);
 }
 
 function emitNativeStackChange(ctx: any, navigationController: any) {
@@ -1175,6 +1164,21 @@ function emitNativeStackChange(ctx: any, navigationController: any) {
   });
 }
 
+function scheduleNativeStackChange(ctx: any, navigationController: any) {
+  'worklet';
+  emitNativeStackChange(ctx, navigationController);
+  if (typeof setTimeout !== 'function') {
+    return;
+  }
+  const emit = () => {
+    'worklet';
+    emitNativeStackChange(ctx, navigationController);
+  };
+  setTimeout(emit, 0);
+  setTimeout(emit, 64);
+  setTimeout(emit, 160);
+}
+
 function applyNavigationChildren(
   parent: any,
   parentId: string,
@@ -1195,8 +1199,72 @@ function applyNavigationChildren(
   } else {
     parent.viewControllers = nativeChildControllers;
   }
+  updateNativeBackGesture(parent);
   layoutVisibleController(parent);
   scheduleAncestorTabBarFront(parent);
+}
+
+function updateNativeBackGesture(navigationController: any) {
+  'worklet';
+  const gesture = navigationController?.interactivePopGestureRecognizer;
+  if (!gesture) {
+    return;
+  }
+  const canPop = arrayCount(navigationController.viewControllers) > 1;
+  gesture.enabled = canPop;
+}
+
+function markNativeStackTransition(
+  parent: any,
+  parentId: string,
+  registry: any,
+  globalObject: Record<string, any>,
+) {
+  'worklet';
+  const transitionToken = (registry.containerTransitionTokens[parentId] ?? 0) + 1;
+  registry.containerTransitionTokens[parentId] = transitionToken;
+  registry.containerTransitioning[parentId] = true;
+  if (typeof setTimeout === 'function') {
+    setTimeout(() => {
+      'worklet';
+      if (registry.containerTransitionTokens[parentId] !== transitionToken) {
+        return;
+      }
+      registry.containerTransitioning[parentId] = false;
+      applyNavigationChildren(parent, parentId, registry, globalObject, false);
+    }, NATIVE_STACK_TRANSITION_MS);
+  } else {
+    registry.containerTransitioning[parentId] = false;
+  }
+}
+
+function animateStackPush(parent: any, controller: any): boolean {
+  'worklet';
+  if (!controller || typeof parent?.pushViewControllerAnimated !== 'function') {
+    return false;
+  }
+  parent.pushViewControllerAnimated(controller, true);
+  return true;
+}
+
+function animateStackPop(parent: any, targetController: any, nextCount: number, previousCount: number): boolean {
+  'worklet';
+  if (!parent) {
+    return false;
+  }
+  if (nextCount === 1 && previousCount > 1 && typeof parent.popToRootViewControllerAnimated === 'function') {
+    parent.popToRootViewControllerAnimated(true);
+    return true;
+  }
+  if (nextCount === previousCount - 1 && typeof parent.popViewControllerAnimated === 'function') {
+    parent.popViewControllerAnimated(true);
+    return true;
+  }
+  if (targetController && typeof parent.popToViewControllerAnimated === 'function') {
+    parent.popToViewControllerAnimated(targetController, true);
+    return true;
+  }
+  return false;
 }
 
 function reconcileNavigationChildren(
@@ -1229,38 +1297,59 @@ function reconcileNavigationChildren(
     if (nextCount === 0) {
       return;
     }
-    const animated =
-      didChangeChildren &&
-      previousKey != null &&
-      previousCount > 0 &&
-      Math.abs(nextCount - previousCount) === 1;
     if (!didChangeChildren && registry.containerTransitioning[parentId]) {
+      updateNativeBackGesture(parent);
       layoutVisibleController(parent);
       scheduleAncestorTabBarFront(parent);
       return;
     }
-    if (animated) {
-      const transitionToken = (registry.containerTransitionTokens[parentId] ?? 0) + 1;
-      registry.containerTransitionTokens[parentId] = transitionToken;
-      registry.containerTransitioning[parentId] = true;
-      if (typeof setTimeout === 'function') {
-        setTimeout(() => {
-          'worklet';
-          if (registry.containerTransitionTokens[parentId] !== transitionToken) {
-            return;
-          }
-          registry.containerTransitioning[parentId] = false;
-          applyNavigationChildren(parent, parentId, registry, globalObject, false);
-        }, NATIVE_STACK_TRANSITION_MS);
-      } else {
+    if (didChangeChildren && previousKey != null && previousCount > 0) {
+      const previousChildIds = navigationChildIdsFromKey(previousKey);
+      const nativeCount = arrayCount(parent.viewControllers);
+      const nativeChildIds = navigationControllerChildIds(parent, registry);
+      if (navigationChildIdsEqual(nativeChildIds, activeChildIds)) {
+        updateNativeBackGesture(parent);
+        layoutVisibleController(parent);
+        scheduleAncestorTabBarFront(parent);
+        return;
+      }
+      const isPush =
+        nextCount === previousCount + 1 &&
+        navigationChildIdsEqual(previousChildIds, activeChildIds.slice(0, previousCount));
+      const isPushFromNativeStack =
+        nativeCount > 0 &&
+        nextCount === nativeCount + 1 &&
+        navigationChildIdsEqual(nativeChildIds, activeChildIds.slice(0, nativeCount));
+      const isPop =
+        nextCount < previousCount &&
+        navigationChildIdsEqual(activeChildIds, previousChildIds.slice(0, nextCount));
+      if ((isPush && nativeCount === previousCount) || isPushFromNativeStack) {
+        markNativeStackTransition(parent, parentId, registry, globalObject);
+        if (animateStackPush(parent, childControllers[nextCount - 1])) {
+          updateNativeBackGesture(parent);
+          layoutVisibleController(parent);
+          scheduleAncestorTabBarFront(parent);
+          return;
+        }
+        registry.containerTransitioning[parentId] = false;
+      }
+      if (isPop && nativeCount > nextCount) {
+        markNativeStackTransition(parent, parentId, registry, globalObject);
+        if (animateStackPop(parent, childControllers[nextCount - 1], nextCount, previousCount)) {
+          updateNativeBackGesture(parent);
+          layoutVisibleController(parent);
+          scheduleAncestorTabBarFront(parent);
+          return;
+        }
         registry.containerTransitioning[parentId] = false;
       }
     }
     if (typeof parent.setViewControllersAnimated === 'function') {
-      parent.setViewControllersAnimated(nativeChildControllers, animated);
+      parent.setViewControllersAnimated(nativeChildControllers, false);
     } else {
       parent.viewControllers = nativeChildControllers;
     }
+    updateNativeBackGesture(parent);
   } else if (parentKind === 'tabs') {
     if (typeof parent.setViewControllersAnimated === 'function') {
       parent.setViewControllersAnimated(nativeChildControllers, false);
@@ -1302,8 +1391,12 @@ function configureNavigationBar(controller: any) {
   navigationBar.prefersLargeTitles = false;
   const UIColor = nativeValue('UIColor');
   const clearColor = UIColor?.clearColor ?? null;
+  const tintColor = nativeColor('#111827', 'labelColor');
   if (clearColor) {
     navigationBar.backgroundColor = clearColor;
+  }
+  if (tintColor) {
+    navigationBar.tintColor = tintColor;
   }
   const UINavigationBarAppearance = nativeValue('UINavigationBarAppearance');
   if (UINavigationBarAppearance && typeof UINavigationBarAppearance.alloc === 'function') {
@@ -1318,6 +1411,9 @@ function configureNavigationBar(controller: any) {
     if (clearColor) {
       appearance.backgroundColor = clearColor;
       appearance.shadowColor = clearColor;
+    }
+    if (tintColor) {
+      navigationBar.tintColor = tintColor;
     }
     navigationBar.standardAppearance = appearance;
     navigationBar.scrollEdgeAppearance = appearance;
@@ -1476,24 +1572,17 @@ const NativeScriptStackController = NativeScriptRuntime.defineUIViewController<{
     const controller = allocated && typeof allocated.init === 'function' ? allocated.init() : allocated;
     configureExtendedLayout(controller);
     configureNavigationBar(controller);
+    updateNativeBackGesture(controller);
     const delegateProtocol =
-      api?.getProtocol?.('UINavigationControllerDelegate') ??
       api?.UINavigationControllerDelegate ??
-      globals.UINavigationControllerDelegate;
+      globals.UINavigationControllerDelegate ??
+      'UINavigationControllerDelegate';
     if (delegateProtocol) {
       controller.delegate = ctx.delegate(controller, delegateProtocol, {
-        navigationControllerWillShowViewControllerAnimated(navigationController: any) {
-          'worklet';
-          if (typeof setTimeout === 'function') {
-            setTimeout(() => {
-              'worklet';
-              emitNativeStackChange(ctx, navigationController);
-            }, 0);
-          }
-        },
         navigationControllerDidShowViewControllerAnimated(navigationController: any) {
           'worklet';
-          emitNativeStackChange(ctx, navigationController);
+          updateNativeBackGesture(navigationController);
+          scheduleNativeStackChange(ctx, navigationController);
         },
       });
     }
@@ -1552,6 +1641,7 @@ const NativeScriptStackController = NativeScriptRuntime.defineUIViewController<{
       controller.setNavigationBarHiddenAnimated(false, false);
     }
     configureNavigationBar(controller);
+    updateNativeBackGesture(controller);
     const globalObject = globalThis as Record<string, any>;
     const registry = getNavigationRegistry(globalObject);
     registry.controllers[props.componentId] = controller;
@@ -1569,6 +1659,7 @@ const NativeScriptStackController = NativeScriptRuntime.defineUIViewController<{
     const registry = getNavigationRegistry(globalObject);
     registry.controllers[props.componentId] = controller;
     registry.kinds[props.componentId] = 'stack';
+    updateNativeBackGesture(controller);
     if (props.parentId) {
       addNavigationChild(registry, props.parentId, props.componentId);
       const parent = registry.controllers[props.parentId];

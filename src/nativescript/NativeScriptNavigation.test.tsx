@@ -216,4 +216,47 @@ describe('createNativeScriptNavigation', () => {
       getNativeScriptNavigationStore().getState().snapshot.root?.children?.map((child) => child.id)
     ).toEqual(['rootComponent']);
   });
+
+  it('trims stale stack tails when pushing from a visible earlier component', async () => {
+    const { Navigation } = createNativeScriptNavigation();
+
+    Navigation.registerComponent('com.example.Root', () => () => null);
+    Navigation.registerComponent('com.example.Detail', () => () => null);
+    await Navigation.setRoot({
+      root: {
+        stack: {
+          id: 'stack',
+          children: [
+            {
+              component: {
+                id: 'rootComponent',
+                name: 'com.example.Root',
+              },
+            },
+            {
+              component: {
+                id: 'staleDetailComponent',
+                name: 'com.example.Detail',
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    jest.useFakeTimers();
+    const push = Navigation.push('rootComponent', {
+      component: {
+        id: 'freshDetailComponent',
+        name: 'com.example.Detail',
+      },
+    });
+    jest.advanceTimersByTime(360);
+    await push;
+    jest.useRealTimers();
+
+    expect(
+      getNativeScriptNavigationStore().getState().snapshot.root?.children?.map((child) => child.id)
+    ).toEqual(['rootComponent', 'freshDetailComponent']);
+  });
 });

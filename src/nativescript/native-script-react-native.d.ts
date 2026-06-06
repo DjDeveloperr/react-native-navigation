@@ -16,6 +16,7 @@ declare module '@nativescript/react-native' {
       implementation: Partial<T>
     ): T;
     targetAction(control: unknown, events: unknown, callback: () => void): void;
+    dispose(callback: () => void): void;
   };
 
   export type UIKitLayoutOptions = {
